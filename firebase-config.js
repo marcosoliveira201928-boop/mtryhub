@@ -1,7 +1,7 @@
 // Cole aqui o firebaseConfig do seu projeto.
 // Firebase Console > Configurações do projeto (ícone de engrenagem) >
 // role até "Seus apps" > app da Web (</>) > "Config".
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyDuMg9W8vyvYP6BfGsLdy1aPCAOqx8I-I8",
   authDomain: "mtry-hub.firebaseapp.com",
   projectId: "mtry-hub",
