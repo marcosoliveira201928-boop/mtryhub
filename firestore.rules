@@ -1,0 +1,55 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        request.auth.uid in get(/databases/$(database)/documents/config/admin).data.uids;
+    }
+
+    // Lista de UIDs com permissão de técnico. Só é editada manualmente
+    // pelo console do Firebase (ver README) — o app nunca escreve aqui.
+    match /config/admin {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Nome do time / frase do hub.
+    match /config/meta {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Um documento por jogador (id = uid do Firebase Auth).
+    match /players/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // POVs em vídeo (YouTube) — só leitura pros jogadores, sem avaliação.
+    match /povs/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Demos (.dem) — link externo pro arquivo.
+    match /demos/{id} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Avaliações das demos (confirmação de que assistiu + 5 pontos positivos/negativos).
+    // Cada jogador só lê/escreve as próprias avaliações; o técnico lê todas.
+    match /reviews/{id} {
+      allow read: if isSignedIn() && (isAdmin() || resource.data.playerUid == request.auth.uid);
+      allow create: if isSignedIn() && request.resource.data.playerUid == request.auth.uid;
+      allow update: if isSignedIn() && resource.data.playerUid == request.auth.uid;
+      allow delete: if isAdmin();
+    }
+  }
+}
