@@ -88,6 +88,22 @@ Ao final, a CLI mostra a URL do site, algo como `https://mtry-hub.web.app`.
 3. Cadastre os vídeos (aba **Vídeos**), atribuindo a um jogador específico ou a "Todos".
 4. Envie para cada jogador: a URL do site + usuário + senha que você definiu para ele.
 
+## Aba "Treino" (gerador de treino por tempo)
+
+Na aba **Treino** (jogadores e técnico), a pessoa arrasta a bolinha até o tempo que tem — **5, 10, 15 … 55 min, 1h, 2h ou 3h** — escolhe (ou deixa aleatório) o mapa e clica em **Gerar meu treino**. O site monta um treino em blocos, cada um com **mapa/modo**, **como abrir** (Workshop), **meta** e **passo a passo**:
+
+- Aquecimento de mira (Aim Botz, Fast Aim/Reflex, training_aim_csgo2) → controle de spray (Recoil Master) → Deathmatch (rifle, tap/burst ou AWP) → Prefire e Utilitários (Yprac Hub) → Retakes → Revisão (POVs/Demos do hub).
+- As metas escalam com o tempo do bloco (ex: aquecimento de 5 min = 45 kills só de headshot; Deathmatch de 10 min = 90 kills).
+- Treinos de 2h e 3h têm sessões diferentes e pausas de 5 min entre elas.
+- O jogador marca cada bloco como feito (barra de progresso). O treino gerado fica salvo no navegador do jogador, então não se perde ao recarregar a página.
+- **Gerar outro treino** troca os exercícios e o mapa do dia.
+
+### Modo "Antes do campeonato"
+
+Em cima da bolinha tem a opção **Antes do campeonato**. Em vez do treino pra evoluir, ela monta uma rotina **leve**, pra chegar aquecido e não cansado: checagem de setup → aquecimento leve de mira → Deathmatch de confiança → pré-aim das posições do seu papel → utilitários das táticas do time (puxa a aba Táticas & Smokes) → alinhamento com o time (callouts, pistol, anti-eco) → revisão rápida → descanso. Treinos de 2h/3h ganham pausas e um aviso de cansaço. O seletor de mapa vira "Mapa do primeiro jogo".
+
+Não precisa mexer nas regras do Firestore: o treino é gerado e guardado no próprio navegador. Pra trocar/adicionar exercícios, edite a lista `DRILLS` no `app.js`.
+
 ## Visual novo + aba "Táticas & Smokes"
 
 - Interface refeita: menu lateral (no celular vira barra inferior), cards grandes com miniatura, e janelas (modais) pra assistir/avaliar sem sair da página. A estrutura Firebase continua a mesma.

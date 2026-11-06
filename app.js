@@ -43,7 +43,8 @@ const ICONS = {
   play: '<path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none"/>',
   left: '<path d="M15 5l-7 7 7 7"/>',
   right: '<path d="M9 5l7 7-7 7"/>',
-  download: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/>'
+  download: '<path d="M12 4v11m0 0-4-4m4 4 4-4M5 20h14"/>',
+  training: '<circle cx="12" cy="13.5" r="7.5"/><path d="M12 9.5v4l2.6 1.6M9.5 3h5M12 3v3"/>'
 };
 function icon(name, size) {
   var s = size || 18;
@@ -182,8 +183,10 @@ onAuthStateChanged(auth, async function (user) {
   isAdmin = false;
   players = []; povs = []; demos = []; tactics = []; reviews = []; watches = [];
   modal = null; lightbox = null; loginError = ""; filters = { status: "all", map: "", type: "" };
+  trainIdx = 5; trainMap = ""; trainPlan = null; trainDone = {}; trainMode = "normal";
   if (user) {
     clearForm("lf-");
+    loadTraining();
     await loadConfig();
     page = "povs";
     subscribeData();
@@ -307,7 +310,8 @@ function navItems() {
   var items = [
     { id: "povs", label: "POVs", short: "POVs", icon: "pov" },
     { id: "demos", label: "Demos", short: "Demos", icon: "demo" },
-    { id: "tactics", label: "Táticas & Smokes", short: "Táticas", icon: "tactic" }
+    { id: "tactics", label: "Táticas & Smokes", short: "Táticas", icon: "tactic" },
+    { id: "training", label: "Treino", short: "Treino", icon: "training" }
   ];
   if (isAdmin) {
     items.push({ id: "players", label: "Jogadores", short: "Jogadores", icon: "players" });
@@ -373,6 +377,7 @@ function emptyState(ic, text) {
 }
 
 function renderPage() {
+  if (page === "training") return renderTraining();
   if (isAdmin) {
     if (page === "povs") return renderAdminItems("pov");
     if (page === "demos") return renderAdminItems("demo");
@@ -809,6 +814,402 @@ function renderAdminSettings() {
 }
 
 /* ================================================================
+   TREINO — gerador de treino por tempo disponível
+   ================================================================ */
+const TRAIN_STOPS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 120, 180];
+const CAT_LABEL = { warmup: "Aquecimento", recoil: "Spray / Recoil", dm: "Deathmatch", prefire: "Prefire", utility: "Utilitários", retake: "Retakes", review: "Revisão", setup: "Setup", team: "Time", rest: "Descanso" };
+const CAT_ORDER = ["warmup", "recoil", "dm", "prefire", "utility", "retake", "review"];
+const CAT_PRIORITY = ["warmup", "dm", "recoil", "prefire", "utility", "review", "retake"];
+const CAT_WEIGHT = { warmup: 2, dm: 4, recoil: 2, prefire: 2, utility: 2, review: 1, retake: 2 };
+const SINGLE_K = [0, 1, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7];   // quantas categorias entram conforme os blocos de 5 min
+const SESSION_TEMPLATES = [
+  [["warmup", 2], ["recoil", 2], ["dm", 4], ["prefire", 2], ["utility", 2]],
+  [["warmup", 1], ["dm", 4], ["prefire", 2], ["utility", 2], ["retake", 2], ["review", 1]],
+  [["warmup", 1], ["recoil", 1], ["dm", 4], ["retake", 3], ["utility", 1], ["review", 2]]
+];
+// Modo "Antes do campeonato": rotina leve (chegar aquecido, não cansado).
+const PRE_ORDER = ["setup", "warmup", "dm", "prefire", "utility", "team", "review", "rest"];
+const PRE_PRIORITY = ["warmup", "dm", "setup", "team", "prefire", "utility", "review", "rest"];
+const PRE_WEIGHT = { setup: 1, warmup: 2, dm: 3, prefire: 2, utility: 2, team: 2, review: 1, rest: 1 };
+const SINGLE_K_PRE = [0, 1, 2, 3, 4, 5, 5, 6, 6, 7, 7, 8, 8];
+const PRE_SESSIONS_2 = [
+  [["setup", 1], ["warmup", 2], ["dm", 3], ["prefire", 2], ["utility", 2]],
+  [["warmup", 1], ["team", 3], ["utility", 2], ["review", 2], ["rest", 2]]
+];
+const PRE_SESSIONS_3 = [
+  [["setup", 1], ["warmup", 2], ["dm", 3], ["prefire", 2], ["utility", 2]],
+  [["warmup", 1], ["team", 3], ["utility", 2], ["review", 2]],
+  [["warmup", 1], ["dm", 2], ["prefire", 2], ["rest", 2]]
+];
+const TRAIN_KEY = "mtry_training_v1";
+
+let trainMode = "normal"; // "normal" | "pre" (antes do campeonato)
+let trainIdx = 5;        // posição da bolinha (padrão: 30 min)
+let trainMap = "";       // "" = aleatório
+let trainPlan = null;
+let trainDone = {};
+
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function nice(n) {
+  n = Math.max(1, n);
+  if (n < 10) return Math.round(n);
+  if (n < 50) return Math.round(n / 5) * 5;
+  return Math.round(n / 10) * 10;
+}
+function fmtMin(m) {
+  if (m < 60) return m + " min";
+  var hh = Math.floor(m / 60), mm = m % 60;
+  return hh + "h" + (mm ? String(mm).padStart(2, "0") : "");
+}
+function fmtTotal(m) {
+  if (m < 60) return m + " minutos";
+  var hh = m / 60;
+  return hh === 1 ? "1 hora" : hh + " horas";
+}
+
+const TV = 'Steam Workshop → pesquise ';
+const DRILLS = {
+  warmup: [
+    { id: "w-botz", make: function (m) { return {
+      title: "Aquecimento de mira — só headshot", map: "Aim Botz", mapHow: TV + '"Aim Botz" (uLLeticaL)',
+      goal: nice(m * 9) + " kills só de headshot",
+      steps: ["Arma: AK-47. Na metade do bloco, troque para a M4A1-S.", "Comece com bots parados; depois ative os bots em movimento.", "Kill sem acertar a cabeça não conta: pare e reposicione a mira."],
+      tip: "Deixe a mira já na altura da cabeça entre um alvo e outro." }; } },
+    { id: "w-fast", make: function (m) { return {
+      title: "Reflexo e flick", map: "Fast Aim / Reflex Training", mapHow: TV + '"Fast Aim Reflex Training"',
+      goal: nice(m * 14) + " alvos acertados",
+      steps: ["Dificuldade média; suba quando passar de 90% de acerto.", "Foque em flicks curtos e secos, sem passar do alvo."],
+      tip: "Relaxe o braço: tensão demais deixa o flick lento." }; } },
+    { id: "w-trainaim", make: function (m) { return {
+      title: "Tap e burst nos bots", map: "training_aim_csgo2", mapHow: TV + '"training_aim_csgo2"',
+      goal: nice(m * 9) + " bots abatidos na cabeça",
+      steps: ["Alterne entre tap (1 tiro) e burst (2–3 balas).", "Comece nos alvos parados e termine nos que se movem."],
+      tip: "Qualidade vale mais que velocidade: 1 tiro na cabeça por alvo." }; } }
+  ],
+  recoil: [
+    { id: "r-master", make: function (m) { return {
+      title: "Controle de spray", map: "Recoil Master — Spray Training", mapHow: TV + '"Recoil Master Spray Training" (uLLeticaL)',
+      goal: nice(m * 3) + " sprays completos",
+      steps: ["Ative o guia (ghost hair) e acompanhe o spray da AK-47 e depois da M4A1-S.", "Na segunda metade, desligue o guia e repita de memória.", "Termine com rajadas curtas de 4–5 balas."],
+      tip: "Puxe o mouse para baixo de forma contínua; não \"belisque\" o spray." }; } },
+    { id: "r-botz", make: function (m) { return {
+      title: "Spray e transferência de alvo", map: "Aim Botz", mapHow: TV + '"Aim Botz" (uLLeticaL)',
+      goal: nice(m * 3) + " sprays de 10 balas",
+      steps: ["Bot parado a média distância, mirando do peito até a cabeça.", "Faça o spray de 10 balas e transfira para o bot ao lado.", "Mantenha o spray dentro do corpo do bot."],
+      tip: "Olhe para onde quer acertar, não para a mira." }; } }
+  ],
+  dm: [
+    { id: "d-rifle", make: function (m, c) { return {
+      title: "Deathmatch com rifle em " + c.map, map: "Deathmatch — " + c.map, mapHow: "Jogar → Deathmatch (modo oficial) ou um servidor comunitário de FFA Deathmatch",
+      goal: nice(m * 9) + " kills (meta: 40% ou mais de headshot)",
+      steps: ["Use só AK-47 (ou M4A1-S).", "Pré-mire os cantos antes de virar; não corra atirando.", "Troque de posição a cada morte para não decorar um único ângulo."],
+      tip: "Pare de andar antes de atirar (counter-strafe)." }; } },
+    { id: "d-tap", make: function (m, c) { return {
+      title: "Deathmatch só tap e burst em " + c.map, map: "Deathmatch — " + c.map, mapHow: "Jogar → Deathmatch (modo oficial) ou um servidor comunitário de FFA Deathmatch",
+      goal: nice(m * 8) + " kills com tap/burst",
+      steps: ["Só vale rajada de até 3 balas.", "Mire na cabeça já durante o deslocamento.", "Morreu duas vezes no mesmo lugar? Mude o ângulo."],
+      tip: "Calma na primeira bala: é ela que decide o duelo." }; } },
+    { id: "d-awp", make: function (m, c) { return {
+      title: "Deathmatch de AWP em " + c.map, map: "Deathmatch — " + c.map, mapHow: "Jogar → Deathmatch (modo oficial) ou um servidor comunitário de FFA Deathmatch",
+      goal: nice(m * 5) + " kills de AWP",
+      steps: ["Segure ângulos e evite peeks desesperados.", "Reposicione depois de cada kill.", "Nenhum tiro de AWP sem parar de andar antes."],
+      tip: "Se errou o primeiro tiro, saia do ângulo em vez de insistir." }; } }
+  ],
+  prefire: [
+    { id: "p-yprac", make: function (m, c) { return {
+      title: "Prefire em " + c.map, map: "Yprac Hub — Prefire (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Prefire → mapa ' + c.map,
+      goal: nice(m * 1.5) + " rotas completas sem errar o primeiro tiro",
+      steps: ["Faça os dois lados (T e CT) em cada rota.", "Foque em crosshair placement e counter-strafe antes de cada tiro.", "Errou a primeira bala? Repita a rota."],
+      tip: "Limpe os ângulos na ordem em que aparecem no jogo, não na ordem que dá menos trabalho." }; } },
+    { id: "p-yprac2", make: function (m, c) { return {
+      title: "Ângulos de entrada em " + c.map, map: "Yprac Hub — Prefire (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Prefire → mapa ' + c.map,
+      goal: nice(m * 1.2) + " rotas de entrada em site",
+      steps: ["Escolha as rotas de execução que seu time mais usa no mapa.", "Repita até acertar sem pausar entre os ângulos.", "Varie: uma rodada pré-mirando, outra reagindo."],
+      tip: "Mire onde o inimigo vai estar, não onde ele está." }; } }
+  ],
+  utility: [
+    { id: "u-yprac", make: function (m, c) { return {
+      title: "Lineups de utilidade em " + c.map, map: "Yprac Hub — Utility (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Utility → mapa ' + c.map,
+      goal: Math.max(2, nice(m * 0.8)) + " lineups dominados (3 acertos seguidos)",
+      steps: ["Escolha os lineups que você realmente usa em " + c.map + ".", "Repita cada um até acertar 3 vezes seguidas.", "Anote os que ainda erra para repetir no próximo treino.", "Confira também a aba Táticas & Smokes do hub."],
+      tip: "Fixe uma referência no cenário e use sempre a mesma." }; } },
+    { id: "u-flash", make: function (m, c) { return {
+      title: "Flashes e molotovs de execução em " + c.map, map: "Yprac Hub — Utility (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Utility → mapa ' + c.map,
+      goal: Math.max(2, nice(m * 0.7)) + " lineups de flash/molotov",
+      steps: ["Treine as utilidades que abrem o site (flash de entrada, molotov de limpeza).", "Cronometre: a utilidade tem que cair antes do seu time entrar.", "Repita até acertar 3 vezes seguidas."],
+      tip: "Flash boa é a que cega o inimigo, não a que cega o seu time." }; } }
+  ],
+  retake: [
+    { id: "t-retake", make: function (m, c) { return {
+      title: "Retakes em " + c.map, map: "Retakes — " + c.map, mapHow: "Servidor comunitário de Retakes (se não achar, use Wingman/Competitivo)",
+      goal: Math.max(2, nice(m * 0.6)) + " rounds de retake",
+      steps: ["Alterne entre retake (CT) e defesa do bomb (T).", "Fale os callouts em voz alta, mesmo treinando sozinho.", "Use utilidade antes de entrar no site."],
+      tip: "Antes de entrar, decida quem limpa qual ângulo." }; } },
+    { id: "t-clutch", make: function (m, c) { return {
+      title: "Clutch 1vX em " + c.map, map: "Retakes — " + c.map, mapHow: "Servidor comunitário de Retakes (se não achar, use Wingman/Competitivo)",
+      goal: Math.max(2, nice(m * 0.5)) + " rounds de clutch",
+      steps: ["Isole os duelos: nunca lute contra dois ao mesmo tempo.", "Use o som para decidir quando se mexer.", "Tempo é seu aliado: não corra se o bomb ainda não está no chão."],
+      tip: "Depois de cada round, diga em uma frase por que ganhou ou perdeu." }; } }
+  ],
+  review: [
+    { id: "v-review", make: function () { return {
+      title: "Revisão e anotações", map: "Aqui no hub", mapHow: "Abas POVs e Demos",
+      goal: "3 erros anotados + 1 ajuste para o próximo treino",
+      steps: ["Assista 1–2 rounds seus (gravação ou demo) ou uma POV da aba POVs.", "Anote 3 erros: posicionamento, mira ou utilidade.", "Defina 1 ajuste concreto para o próximo treino."],
+      tip: "Um ajuste bem feito vale mais que dez anotados e esquecidos." }; } }
+  ]
+};
+
+const PRE_DRILLS = {
+  setup: [
+    { id: "s-config", make: function () { return {
+      title: "Checagem de setup", map: "Seu PC e o CS2", mapHow: "Sem abrir mapa — confira tudo antes de entrar",
+      goal: "Tudo conferido, sem mexer em nada depois",
+      steps: ["Mouse e teclado: sensibilidade, DPI e crosshair iguais aos que você sempre usa.", "Áudio: teste o som dos passos e o microfone.", "Rede: feche downloads e programas pesados e confira o ping (de preferência no cabo).", "Feche o que não precisa, ative o Não perturbe e deixe água por perto."],
+      tip: "Dia de campeonato não é dia de mudar config: só mexa se algo estiver quebrado." }; } },
+    { id: "s-ambiente", make: function () { return {
+      title: "Ambiente e equipamento", map: "Seu PC e o CS2", mapHow: "Sem abrir mapa — confira tudo antes de entrar",
+      goal: "Ambiente pronto e sem pendências",
+      steps: ["Atualizações do Windows/drivers: nada pendente para aparecer no meio do jogo.", "Teste o mouse, o headset e a conexão com a call do time.", "Celular no silencioso, cadeira e monitor ajustados.", "Tenha um plano B para internet e energia (hotspot, carregador)."],
+      tip: "Resolva agora os problemas pequenos: no jogo eles viram desculpa." }; } }
+  ],
+  warmup: [
+    { id: "pw-botz", make: function (m) { return {
+      title: "Aquecimento leve de mira", map: "Aim Botz", mapHow: TV + '"Aim Botz" (uLLeticaL)',
+      goal: nice(m * 7) + " kills de headshot, sem pressa",
+      steps: ["Comece nos bots parados, devagar, para esquentar a mão.", "Depois, bots lentos em movimento.", "Se a mão cansar, pare: o objetivo é esquentar, não treinar pesado."],
+      tip: "Qualidade, não quantidade: termine o bloco confiante." }; } },
+    { id: "pw-recoil", make: function (m) { return {
+      title: "Spray de aquecimento", map: "Recoil Master — Spray Training", mapHow: TV + '"Recoil Master Spray Training" (uLLeticaL)',
+      goal: Math.max(2, nice(m * 2)) + " sprays com a arma que você mais usa",
+      steps: ["Sprays curtos e médios da AK-47 e da M4A1-S com o guia ligado.", "Foque no ritmo, sem forçar o punho."],
+      tip: "Mão solta: spray tenso sai torto." }; } },
+    { id: "pw-reflex", make: function (m) { return {
+      title: "Reflexo em dificuldade fácil", map: "Fast Aim / Reflex Training", mapHow: TV + '"Fast Aim Reflex Training"',
+      goal: nice(m * 10) + " alvos acertados",
+      steps: ["Dificuldade fácil ou média, sem forçar a velocidade.", "Flicks curtos e secos, sem passar do alvo."],
+      tip: "Esquente primeiro, acelere só se estiver 100%." }; } }
+  ],
+  dm: [
+    { id: "pd-rifle", make: function (m, c) { return {
+      title: "Deathmatch de confiança em " + c.map, map: "Deathmatch — " + c.map, mapHow: "Jogar → Deathmatch (modo oficial) ou um servidor comunitário de FFA Deathmatch",
+      goal: nice(m * 7) + " kills, sem se estressar com a sequência",
+      steps: ["Use as armas que você usa em jogo (AK-47, M4 ou AWP).", "Foque em acertar a primeira bala e em jogar os ângulos que o time vai usar.", "Morreu? Respire e siga: não analise cada morte agora."],
+      tip: "Termine o bloco com uma sequência boa para entrar confiante." }; } },
+    { id: "pd-papel", make: function (m, c) { return {
+      title: "Deathmatch jogando o seu papel em " + c.map, map: "Deathmatch — " + c.map, mapHow: "Jogar → Deathmatch (modo oficial) ou um servidor comunitário de FFA Deathmatch",
+      goal: nice(m * 6) + " kills, passando pelas posições do seu papel",
+      steps: ["Passe pelas posições que você ocupa no jogo e pré-mire os ângulos de lá.", "Treine os reposicionamentos depois de cada kill.", "Sem forçar duelo ruim: aqui vale decisão certa, não só kill."],
+      tip: "Se o ritmo estiver baixo, melhor parar cedo do que entrar cansado." }; } }
+  ],
+  prefire: [
+    { id: "pp-papel", make: function (m, c) { return {
+      title: "Pré-aim das posições do seu papel em " + c.map, map: "Yprac Hub — Prefire (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Prefire → mapa ' + c.map,
+      goal: nice(m * 1.2) + " rotas sem errar o primeiro tiro",
+      steps: ["Faça só as rotas do seu papel nesse mapa (lado T e CT).", "Limpe os ângulos na ordem certa e pare antes de atirar.", "Sem pressa: a ideia é fixar o movimento."],
+      tip: "Repetir o que você já sabe dá mais confiança do que aprender rota nova hoje." }; } }
+  ],
+  utility: [
+    { id: "pu-time", make: function (m, c) { return {
+      title: "Utilitários das táticas do time em " + c.map, map: "Yprac Hub — Utility (" + c.map + ")", mapHow: TV + '"Yprac Hub" (Yesber) → modo Utility → mapa ' + c.map,
+      goal: Math.max(2, nice(m * 0.8)) + " lineups da sua parte nas táticas",
+      steps: ["Abra a aba Táticas & Smokes do hub e pegue as táticas desse mapa.", "Treine só os lineups que o seu papel executa.", "Acerte cada um 3 vezes seguidas e pare — sem inventar lineup novo hoje."],
+      tip: "Dia de jogo é para repetir o que você já domina." }; } }
+  ],
+  team: [
+    { id: "tm-sync", make: function (m, c) { return {
+      title: "Alinhamento com o time em " + c.map, map: "Call do time (Discord)", mapHow: "Todo mundo na call, com os callouts do mapa à mão",
+      goal: "3 combinados fechados: defaults, pistol e anti-eco",
+      steps: ["Revisem os callouts do mapa e quem cobre cada ângulo.", "Fechem o plano do pistol round e o do anti-eco.", "Definam quem faz a call de meio de round e quem a assume se ele cair.", "Combinem como falar depois de um round perdido: curto e objetivo."],
+      tip: "Um combinado simples e repetido vence um plano complicado." }; } },
+    { id: "tm-server", make: function (m, c) { return {
+      title: "Execuções no servidor privado — " + c.map, map: "Servidor privado — " + c.map, mapHow: "Crie um servidor/lobby privado e rode as táticas sem bots",
+      goal: Math.max(2, nice(m * 0.5)) + " execuções limpas",
+      steps: ["Rodem cada tática do mapa até sair no tempo certo.", "Parem na primeira que sair errada e ajustem o timing.", "Terminem sempre com uma execução que deu certo."],
+      tip: "Termine com algo que deu certo para entrar com a moral alta." }; } }
+  ],
+  review: [
+    { id: "pv-review", make: function () { return {
+      title: "Revisão rápida", map: "Aqui no hub", mapHow: "Abas POVs, Demos e Táticas & Smokes",
+      goal: "Relembrar 3 pontos-chave para o jogo",
+      steps: ["Reveja suas últimas avaliações na aba Demos e os erros que você anotou.", "Assista uma POV ou demo do adversário, se tiver.", "Escolha 3 pontos-chave para lembrar durante o jogo (mira, posicionamento e utilidade)."],
+      tip: "Três pontos simples são mais fáceis de lembrar do que dez." }; } }
+  ],
+  rest: [
+    { id: "z-rest", make: function () { return {
+      title: "Descanso e foco", map: "Longe do PC", mapHow: "Sem treinar mais",
+      goal: "Chegar descansado e hidratado",
+      steps: ["Levante, beba água e coma algo leve.", "Alongue punhos, mãos e pescoço.", "Respire fundo por 1 minuto e visualize as primeiras rodadas.", "Evite redes sociais e discussões: guarde a energia para o jogo."],
+      tip: "Treinar a mais agora só cansa a mão. Confie no que você já fez." }; } }
+  ]
+};
+
+function allocateUnits(pairs, units) {
+  var out = {};
+  pairs.forEach(function (p) { out[p[0]] = 1; });
+  var remaining = Math.max(0, units - pairs.length);
+  var W = pairs.reduce(function (sum, p) { return sum + p[1]; }, 0);
+  var rems = [], given = 0;
+  pairs.forEach(function (p) {
+    var q = remaining * p[1] / W, f = Math.floor(q);
+    out[p[0]] += f; given += f;
+    rems.push({ cat: p[0], frac: q - f, w: p[1] });
+  });
+  rems.sort(function (a, b) { return b.frac - a.frac || b.w - a.w; });
+  for (var i = 0; given < remaining; i = (i + 1) % rems.length) { out[rems[i].cat]++; given++; }
+  return out;
+}
+
+function generatePlan(total, mapChoice, seed, mode) {
+  var pre = mode === "pre";
+  var pools = pre ? PRE_DRILLS : DRILLS;
+  var order = pre ? PRE_ORDER : CAT_ORDER;
+  var priority = pre ? PRE_PRIORITY : CAT_PRIORITY;
+  var weights = pre ? PRE_WEIGHT : CAT_WEIGHT;
+  var singleK = pre ? SINGLE_K_PRE : SINGLE_K;
+  var rng = mulberry32(seed);
+  var map = mapChoice || MAPS[Math.floor(rng() * MAPS.length)];
+  var ctx = { map: map, used: {} };
+  var units = total / 5;
+
+  function pickDrill(cat) {
+    var pool = pools[cat];
+    var avail = pool.filter(function (d) { return !ctx.used[d.id]; });
+    var list = avail.length ? avail : pool;
+    var d = list[Math.floor(rng() * list.length)];
+    ctx.used[d.id] = true;
+    return d;
+  }
+  function session(pairs, sessionUnits) {
+    var counts = allocateUnits(pairs, sessionUnits), out = [];
+    order.forEach(function (cat) {
+      if (!counts[cat]) return;
+      var minutes = counts[cat] * 5, d = pickDrill(cat), made = d.make(minutes, ctx);
+      out.push(Object.assign({ kind: "drill", cat: cat, minutes: minutes }, made));
+    });
+    return out;
+  }
+
+  var blocks = [], nSessions = total <= 60 ? 1 : (total === 120 ? 2 : 3);
+  if (nSessions === 1) {
+    var pairs = priority.slice(0, singleK[Math.min(units, 12)]).map(function (c) { return [c, weights[c]]; });
+    blocks = session(pairs, units);
+  } else {
+    var work = units - (nSessions - 1), base = Math.floor(work / nSessions), extra = work - base * nSessions;
+    for (var s = 0; s < nSessions; s++) {
+      if (s > 0) blocks.push({ kind: "break", minutes: 5, title: "Pausa", steps: ["Levante, beba água e alongue punhos e pescoço.", "Olhe para longe por 20 segundos para descansar a vista."], tip: "Descansar entre as sessões mantém a qualidade do treino." });
+      var tpl = pre ? (nSessions === 2 ? PRE_SESSIONS_2 : PRE_SESSIONS_3)[s] : SESSION_TEMPLATES[s];
+      blocks = blocks.concat(session(tpl, base + (s < extra ? 1 : 0)));
+    }
+  }
+  var t = 0;
+  blocks.forEach(function (b) { b.start = t; t += b.minutes; b.end = t; });
+  return { total: total, map: map, seed: seed, mode: pre ? "pre" : "normal", blocks: blocks };
+}
+
+function trainKey() { return TRAIN_KEY + "_" + (currentUser ? currentUser.uid : "anon"); }
+function saveTraining() {
+  try { localStorage.setItem(trainKey(), JSON.stringify({ idx: trainIdx, map: trainMap, mode: trainMode, plan: trainPlan, done: trainDone })); } catch (e) {}
+}
+function loadTraining() {
+  try {
+    var raw = localStorage.getItem(trainKey());
+    if (!raw) return;
+    var o = JSON.parse(raw);
+    if (typeof o.idx === "number" && o.idx >= 0 && o.idx < TRAIN_STOPS.length) trainIdx = o.idx;
+    if (typeof o.map === "string") trainMap = o.map;
+    if (o.mode === "pre" || o.mode === "normal") trainMode = o.mode;
+    if (o.plan && Array.isArray(o.plan.blocks) && o.plan.blocks.length) trainPlan = o.plan;
+    if (o.done && typeof o.done === "object") trainDone = o.done;
+  } catch (e) {}
+}
+function syncTrainUI() {
+  var r = document.getElementById("train-range");
+  if (!r) return;
+  r.value = trainIdx;
+  r.style.setProperty("--p", (trainIdx / (TRAIN_STOPS.length - 1) * 100) + "%");
+  var l = document.getElementById("train-label");
+  if (l) l.textContent = fmtTotal(TRAIN_STOPS[trainIdx]);
+  document.querySelectorAll("#train-ticks .tick").forEach(function (t, i) { t.classList.toggle("active", i === trainIdx); });
+}
+
+function renderTraining() {
+  var pct = trainIdx / (TRAIN_STOPS.length - 1) * 100;
+  var ticks = TRAIN_STOPS.map(function (m, i) {
+    return `<button type="button" class="tick ${i === trainIdx ? "active" : ""}" data-action="train-set" data-v="${i}" aria-label="${fmtTotal(m)}">${m < 60 ? m : (m / 60) + "h"}</button>`;
+  }).join("");
+  var mapOpts = `<option value="">Aleatório</option>` + MAPS.map(function (m) {
+    return `<option value="${m}" ${trainMap === m ? "selected" : ""}>${m}</option>`;
+  }).join("");
+  var isPre = trainMode === "pre";
+  var panel = `<div class="panel train-panel">
+      <div class="seg train-seg">
+        <button class="seg-btn ${!isPre ? "active" : ""}" data-action="train-mode" data-v="normal" type="button">Treino normal</button>
+        <button class="seg-btn ${isPre ? "active" : ""}" data-action="train-mode" data-v="pre" type="button">Antes do campeonato</button>
+      </div>
+      <p class="train-modehelp">${isPre
+        ? "Rotina leve pra chegar aquecido, não cansado: setup, aquecimento, pré-aim e utilitários do seu papel, alinhamento com o time e descanso."
+        : "Treino pra evoluir: mira, spray, deathmatch, prefire, utilitários e revisão."}</p>
+      <div class="train-top">
+        <div><div class="train-small">Tempo disponível pra treinar</div><div class="train-big" id="train-label">${fmtTotal(TRAIN_STOPS[trainIdx])}</div></div>
+        <label class="field train-map"><span>${isPre ? "Mapa do primeiro jogo" : "Mapa do treino"}</span><select id="train-map">${mapOpts}</select></label>
+      </div>
+      <div class="range-wrap">
+        <input type="range" class="range" id="train-range" min="0" max="${TRAIN_STOPS.length - 1}" step="1" value="${trainIdx}" style="--p:${pct}%" aria-label="Tempo disponível para treinar">
+        <div class="ticks" id="train-ticks">${ticks}</div>
+      </div>
+      <button class="btn primary block" type="button" data-action="train-generate">${icon("training", 18)} ${trainPlan && (trainPlan.mode || "normal") === trainMode ? "Gerar outro treino" : "Gerar meu treino"}</button>
+    </div>`;
+  return pageHead("Treino", "Arraste a bolinha até o tempo que você tem e receba um treino pronto: mapa, o que fazer e metas.") +
+    panel + (trainPlan ? renderTrainPlan() : emptyState("training", "Escolha o tempo e clique em \"Gerar meu treino\"."));
+}
+
+function renderTrainPlan() {
+  var pl = trainPlan, blocks = pl.blocks;
+  var doneN = blocks.filter(function (b, i) { return trainDone[i]; }).length;
+  var pct = Math.round(doneN / blocks.length * 100);
+  var isPre = pl.mode === "pre";
+  var kind = isPre ? "Pré-campeonato" : pl.total <= 15 ? "Treino rápido" : pl.total <= 45 ? "Treino médio" : pl.total <= 60 ? "Treino completo" : "Treino longo";
+  var n = 0;
+  var cards = blocks.map(function (b, i) {
+    var done = !!trainDone[i];
+    var check = `<button class="tcheck ${done ? "on" : ""}" type="button" data-action="train-toggle" data-v="${i}" aria-pressed="${done}" aria-label="Marcar bloco como feito">${icon("check", 18)}</button>`;
+    var range = fmtMin(b.start) + " → " + fmtMin(b.end);
+    if (b.kind === "break") {
+      return `<article class="tblock brk ${done ? "done" : ""}">${check}<div class="tb-main">
+        <div class="tb-top"><span class="chip">Pausa</span><span class="chip">${h(range)}</span></div>
+        <h3>${h(b.title)}</h3>
+        <ul class="tb-steps">${b.steps.map(function (x) { return `<li>${h(x)}</li>`; }).join("")}</ul></div></article>`;
+    }
+    n++;
+    return `<article class="tblock ${done ? "done" : ""}">${check}<div class="tb-main">
+      <div class="tb-top"><span class="chip accent">Bloco ${n}</span><span class="chip">${b.minutes} min</span><span class="chip">${h(CAT_LABEL[b.cat] || b.cat)}</span><span class="tb-range">${h(range)}</span></div>
+      <h3>${h(b.title)}</h3>
+      <div class="tb-map">${icon("tactic", 16)}<div><strong>${h(b.map)}</strong><small>${h(b.mapHow)}</small></div></div>
+      <div class="tb-goal"><span>Meta</span>${h(b.goal)}</div>
+      <ul class="tb-steps">${b.steps.map(function (x) { return `<li>${h(x)}</li>`; }).join("")}</ul>
+      <p class="tb-tip"><b>Dica:</b> ${h(b.tip)}</p></div></article>`;
+  }).join("");
+  var finished = doneN === blocks.length;
+  return `<div id="train-plan" class="train-head">
+      <div><h2>${kind} · ${fmtTotal(pl.total)}</h2><p>${isPre ? "Mapa do primeiro jogo" : "Mapa do dia"}: <b>${h(pl.map)}</b> · ${blocks.filter(function (b) { return b.kind === "drill"; }).length} blocos${blocks.some(function (b) { return b.kind === "break"; }) ? " + pausas" : ""}</p></div>
+      <button class="btn sm" type="button" data-action="train-reset">Limpar</button>
+    </div>
+    <div class="progress" aria-label="Progresso do treino"><i style="width:${pct}%"></i></div>
+    <div class="progress-txt">${doneN} de ${blocks.length} concluídos</div>
+    ${isPre && pl.total >= 120 ? `<div class="status-box warn" style="margin-bottom:16px">${icon("clock", 20)}<div><strong>Atenção ao cansaço</strong><span>Antes de jogo, mais de 1 hora costuma cansar a mão. Se o campeonato for logo, prefira 30–60 min.</span></div></div>` : ""}
+    ${finished ? `<div class="status-box ok" style="margin-bottom:16px">${icon("check", 20)}<div><strong>Treino concluído!</strong><span>Bom trabalho. Gere outro quando tiver tempo.</span></div></div>` : ""}
+    <div class="tblocks">${cards}</div>`;
+}
+
+/* ================================================================
    AÇÕES
    ================================================================ */
 async function withBusy(fn, okMsg) {
@@ -950,10 +1351,16 @@ async function deleteItem(kind, id) {
    EVENTOS (delegados)
    ================================================================ */
 document.addEventListener("input", function (e) {
+  if (e.target && e.target.id === "train-range") {
+    trainIdx = parseInt(e.target.value, 10) || 0;
+    syncTrainUI(); saveTraining();
+    return;
+  }
   var k = e.target && e.target.getAttribute && e.target.getAttribute("data-k");
   if (k) formState[k] = e.target.value;
 });
 document.addEventListener("change", function (e) {
+  if (e.target && e.target.id === "train-map") { trainMap = e.target.value; saveTraining(); return; }
   var k = e.target && e.target.getAttribute && e.target.getAttribute("data-k");
   if (k) formState[k] = e.target.value;
 });
@@ -1008,6 +1415,16 @@ document.addEventListener("click", function (e) {
     case "mark-watched": markWatched(id); break;
     case "toggle-item": openAdminItem = openAdminItem === v ? null : v; render(); break;
     case "del": deleteItem(el.getAttribute("data-kind"), id); break;
+    case "train-set": trainIdx = parseInt(v, 10) || 0; syncTrainUI(); saveTraining(); break;
+    case "train-mode": trainMode = v === "pre" ? "pre" : "normal"; saveTraining(); render(); break;
+    case "train-generate":
+      trainPlan = generatePlan(TRAIN_STOPS[trainIdx], trainMap, Date.now(), trainMode);
+      trainDone = {}; saveTraining(); render();
+      var tp = document.getElementById("train-plan");
+      if (tp && tp.scrollIntoView) tp.scrollIntoView({ behavior: "smooth", block: "start" });
+      break;
+    case "train-toggle": trainDone[v] = !trainDone[v]; saveTraining(); render(); break;
+    case "train-reset": trainPlan = null; trainDone = {}; saveTraining(); render(); break;
     case "save-meta": saveMeta(); break;
     case "save-pass": savePass(); break;
   }
