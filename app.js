@@ -62,7 +62,7 @@ let meta = { teamName: "MTRY Hub", tagline: "Central de demos da equipe" };
 let players = [];   // { uid, name, username, email, team }
 let povs = [];      // { id, title, url, videoId, assignedTo, note, addedAt }
 let demos = [];     // { id, title, url, assignedTo, note, addedAt }
-let tactics = [];   // { id, title, type, map, side, team, youtubeUrl, videoId, images[], note, addedAt }
+let tactics = [];   // { id, title, type, map, side, team, videoIds[], youtubeUrls[], images[], note, addedAt }
 let reviews = [];   // { id, itemId, playerUid, playerName, positives[5], negatives[5], submittedAt }
 let watches = [];   // { id, itemId, playerUid, playerName, openedAt, watchedAt }
 let subs = [];
@@ -75,6 +75,7 @@ let lightbox = null;         // { urls: [], i: 0 }
 let loginTab = "player";
 let loginError = "";
 let busy = false;
+let openTacticEdit = null;   // id da tática com o painel "adicionar mídia" aberto (técnico)
 let openAdminItem = null;    // "pov:ID" | "demo:ID"
 let formState = {};          // guarda o que foi digitado (os formulários sobrevivem aos re-renders)
 const warnedColls = {};
@@ -456,9 +457,44 @@ function demoCard(v) {
 /* ================================================================
    JOGADOR — Táticas & Smokes
    ================================================================ */
+// Vídeos de uma tática (aceita táticas antigas, que tinham um vídeo só).
+function tacticVideos(t) {
+  var out = [], seen = {};
+  function add(id, url) { if (id && !seen[id]) { seen[id] = 1; out.push({ id: id, url: url || ("https://youtu.be/" + id) }); } }
+  if (Array.isArray(t.videoIds)) t.videoIds.forEach(function (id, i) { add(id, (t.youtubeUrls || [])[i]); });
+  else add(t.videoId || extractYoutubeId(t.youtubeUrl), t.youtubeUrl);
+  return out;
+}
+function parseVideoLines(text) {
+  var ids = [], urls = [], bad = [];
+  String(text || "").split(/\s+/).filter(Boolean).forEach(function (l) {
+    var id = extractYoutubeId(l);
+    if (!id) bad.push(l);
+    else if (ids.indexOf(id) === -1) { ids.push(id); urls.push(l); }
+  });
+  return { ids: ids, urls: urls, bad: bad };
+}
+function parseImageLines(text) {
+  var urls = [], err = "";
+  String(text || "").split(/\s+/).filter(Boolean).forEach(function (u) {
+    if (err) return;
+    if (!/^https?:\/\//i.test(u)) err = "Link de imagem inválido: " + u;
+    else if (isImgbbPageLink(u)) err = "Use o \"Link direto\" do imgbb (começa com https://i.ibb.co/). Esse é o link da página.";
+    else if (urls.indexOf(u) === -1) urls.push(u);
+  });
+  return { urls: urls, err: err };
+}
+function tacticMediaPayload(vids, imgs) {
+  return {
+    videoIds: vids.map(function (v) { return v.id; }), youtubeUrls: vids.map(function (v) { return v.url; }),
+    youtubeUrl: vids[0] ? vids[0].url : "", videoId: vids[0] ? vids[0].id : "", images: imgs
+  };
+}
+
 function tacticCover(t) {
   var img = (t.images || [])[0];
-  var src = img || ytThumb(t.videoId || extractYoutubeId(t.youtubeUrl));
+  var v0 = tacticVideos(t)[0];
+  var src = img || ytThumb(v0 && v0.id);
   return src ? `<img loading="lazy" referrerpolicy="no-referrer" src="${h(src)}" alt="" onerror="this.style.display='none'">` : "";
 }
 
@@ -489,14 +525,14 @@ function renderPlayerTactics() {
 
 function tacticCard(t) {
   var imgs = (t.images || []).length;
-  var hasVideo = !!(t.videoId || extractYoutubeId(t.youtubeUrl));
+  var nVideos = tacticVideos(t).length, hasVideo = nVideos > 0;
   var cover = tacticCover(t);
   return `
   <article class="card" tabindex="0" data-action="open-modal" data-v="tactic:${t.id}">
     <div class="media">
       ${cover || `<div class="media-ph">${icon("tactic", 40)}</div>`}
       ${hasVideo ? `<span class="play-btn">${icon("play", 18)}</span>` : ""}
-      <div class="media-tags">${imgs ? `<span class="chip">${icon("image", 13)} ${imgs}</span>` : ""}</div>
+      <div class="media-tags">${nVideos > 1 ? `<span class="chip">${icon("pov", 13)} ${nVideos}</span>` : ""}${imgs ? `<span class="chip">${icon("image", 13)} ${imgs}</span>` : ""}</div>
     </div>
     <div class="card-body">
       <div class="tags">
@@ -557,13 +593,17 @@ function modalShell(item) {
         <div id="modal-dyn"></div>
       </div>`;
   } else {
-    var tv = item.videoId || extractYoutubeId(item.youtubeUrl);
+    var vids = tacticVideos(item);
+    var switcher = vids.length > 1 ? `<div class="section-label" style="margin-top:0">Vídeos (${vids.length})</div><div class="vlist">${vids.map(function (v, i) {
+      return `<button class="vitem ${i === 0 ? "active" : ""}" type="button" data-action="tv-select" data-v="${v.id}"><span class="vthumb"><img loading="lazy" src="${ytThumb(v.id)}" alt=""></span><span>Vídeo ${i + 1}</span></button>`;
+    }).join("")}</div>` : "";
     var imgs = item.images || [];
     var gallery = imgs.length ? `<div class="section-label">Imagens</div><div class="gallery">${imgs.map(function (u, i) {
       return `<button class="gthumb" type="button" data-action="lb-open" data-v="${item.id}:${i}"><img loading="lazy" referrerpolicy="no-referrer" src="${h(u)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'img-broken',textContent:'Imagem não carregou — use o link direto do imgbb'}))"></button>`;
     }).join("")}</div>` : "";
-    inner = (tv ? ytIframe(tv, item.title, false) : "") + `
-      <div class="modal-body" ${tv ? "" : 'style="padding-top:64px"'}>
+    inner = (vids.length ? ytIframe(vids[0].id, item.title, false) : "") + `
+      <div class="modal-body" ${vids.length ? "" : 'style="padding-top:64px"'}>
+        ${switcher}
         <div class="tags">
           ${item.type ? `<span class="chip accent">${h(item.type)}</span>` : ""}
           ${item.map ? `<span class="chip">${h(item.map)}</span>` : ""}
@@ -728,6 +768,26 @@ function demoStatusRow(it, p) {
 /* ================================================================
    TÉCNICO — Táticas & Smokes
    ================================================================ */
+function tacticEditPanel(t) {
+  var vids = tacticVideos(t), imgs = t.images || [];
+  function mrow(label, url, kind, i) {
+    return `<div class="mrow"><span class="mrow-t">${label} ${i + 1} · ${h(url)}</span><button class="icon-btn danger" type="button" data-action="tactic-rm" data-id="${t.id}" data-kind="${kind}" data-i="${i}" title="Remover" aria-label="Remover">${icon("trash", 14)}</button></div>`;
+  }
+  var vrows = vids.map(function (v, i) { return mrow("Vídeo", v.url, "video", i); }).join("");
+  var irows = imgs.map(function (u, i) { return mrow("Imagem", u, "image", i); }).join("");
+  return `<div class="arow-detail tx-panel">
+    <div class="section-label" style="margin-top:0">Vídeos (${vids.length})</div>
+    ${vrows || '<div class="help">Nenhum vídeo ainda.</div>'}
+    <label class="field" style="margin-top:12px"><span>Adicionar mais vídeos do YouTube — um link por linha</span>
+      <textarea data-k="tx-${t.id}-yt" style="min-height:76px" placeholder="https://youtube.com/watch?v=..."></textarea></label>
+    <div class="section-label">Imagens (${imgs.length})</div>
+    ${irows || '<div class="help">Nenhuma imagem ainda.</div>'}
+    <label class="field" style="margin-top:12px"><span>Adicionar mais imagens do imgbb — um link por linha</span>
+      <textarea data-k="tx-${t.id}-imgs" style="min-height:76px" placeholder="https://i.ibb.co/xxxxxxx/imagem.png"></textarea></label>
+    <button class="btn primary" type="button" data-action="tactic-save-media" data-id="${t.id}" ${busy ? "disabled" : ""}>${icon("check", 16)} Salvar</button>
+  </div>`;
+}
+
 function renderAdminTactics() {
   var items = tactics.slice().sort(byDateDesc);
   var teamOpts = teamList().map(function (t) { return `<option value="${h(t)}">Só o time ${h(t)}</option>`; }).join("");
@@ -740,7 +800,8 @@ function renderAdminTactics() {
           <label class="field"><span>Mapa</span><input type="text" list="map-list" data-k="tc-map" placeholder="ex: Mirage"><datalist id="map-list">${MAPS.map(function (m) { return `<option value="${m}">`; }).join("")}</datalist></label>
           <label class="field"><span>Lado</span><select data-k="tc-side">${SIDES.map(function (s) { return `<option value="${s[0]}">${s[1]}</option>`; }).join("")}</select></label>
           <label class="field"><span>Visível para</span><select data-k="tc-team"><option value="">Todos os times</option>${teamOpts}</select></label>
-          <label class="field span-2"><span>Vídeo do YouTube (opcional)</span><input type="url" data-k="tc-yt" placeholder="https://youtube.com/watch?v=..."></label>
+          <label class="field span-2"><span>Vídeos do YouTube (opcional) — um link por linha</span><textarea data-k="tc-yt" style="min-height:76px" placeholder="https://youtube.com/watch?v=...&#10;https://youtu.be/..."></textarea>
+            <div class="help">Pode colocar quantos vídeos quiser. Depois de publicar, dá pra adicionar mais pelo botão +.</div></label>
           <label class="field span-2"><span>Imagens do imgbb (opcional) — um link por linha</span><textarea data-k="tc-imgs" placeholder="https://i.ibb.co/xxxxxxx/imagem1.png&#10;https://i.ibb.co/yyyyyyy/imagem2.png"></textarea>
             <div class="help">Suba em imgbb.com e copie o <b>"Link direto"</b> (começa com <b>https://i.ibb.co/</b>). O link da página (ibb.co/…) não funciona.</div></label>
           <label class="field span-2"><span>Descrição (opcional)</span><textarea data-k="tc-note" placeholder="Passo a passo, timing, quem faz o quê…"></textarea></label>
@@ -749,17 +810,19 @@ function renderAdminTactics() {
       </form>
     </div>`;
   var rows = items.map(function (t) {
-    var cover = tacticCover(t);
-    return `<div class="arow">
+    var cover = tacticCover(t), nv = tacticVideos(t).length, ni = (t.images || []).length, open = openTacticEdit === t.id;
+    var sub = [t.type, t.map, t.side, t.team ? "Time " + t.team : "", nv + (nv === 1 ? " vídeo" : " vídeos"), ni + (ni === 1 ? " imagem" : " imagens"), fmtDate(t.addedAt)].filter(Boolean).map(h).join(" · ");
+    return `<div><div class="arow">
       <button class="arow-main" type="button" data-action="open-modal" data-v="tactic:${t.id}">
         <span class="arow-thumb">${cover || icon("tactic", 20)}</span>
-        <span class="arow-info"><strong>${h(t.title)}</strong><small>${[t.type, t.map, t.side, t.team ? "Time " + t.team : "", fmtDate(t.addedAt)].filter(Boolean).map(h).join(" · ")}</small></span>
+        <span class="arow-info"><strong>${h(t.title)}</strong><small>${sub}</small></span>
         ${icon("eye", 16)}
       </button>
+      <button class="icon-btn ${open ? "on" : ""}" type="button" data-action="tactic-edit" data-id="${t.id}" title="Adicionar vídeos ou imagens" aria-label="Adicionar vídeos ou imagens">${icon("plus", 16)}</button>
       <button class="icon-btn danger" type="button" data-action="del" data-kind="tactic" data-id="${t.id}" title="Remover" aria-label="Remover">${icon("trash", 16)}</button>
-    </div>`;
+    </div>${open ? tacticEditPanel(t) : ""}</div>`;
   }).join("");
-  return pageHead("Táticas & Smokes", "Publique táticas, smokes e lineups: vídeo no YouTube e imagens hospedadas no imgbb.") +
+  return pageHead("Táticas & Smokes", "Publique táticas, smokes e lineups: vídeos no YouTube e imagens hospedadas no imgbb.") +
     form + `<div class="panel"><div class="panel-title">Publicadas (${items.length})</div>${rows || emptyState("tactic", "Nada publicado ainda.")}</div>`;
 }
 
@@ -1283,22 +1346,45 @@ async function addLinkItem(kind) {
 }
 
 async function addTactic() {
-  var title = val("tc-title").trim(), yt = val("tc-yt").trim();
-  var imgs = val("tc-imgs").split(/\s+/).filter(Boolean);
-  if (yt && !extractYoutubeId(yt)) { toast("O link do YouTube não parece válido.", "err"); return; }
-  for (var i = 0; i < imgs.length; i++) {
-    if (!/^https?:\/\//i.test(imgs[i])) { toast("Link de imagem inválido: " + imgs[i], "err"); return; }
-    if (isImgbbPageLink(imgs[i])) { toast("Use o \"Link direto\" do imgbb (começa com https://i.ibb.co/). Esse é o link da página.", "err"); return; }
-  }
-  if (!yt && !imgs.length) { toast("Adicione um vídeo do YouTube e/ou pelo menos uma imagem.", "err"); return; }
+  var title = val("tc-title").trim();
+  var pv = parseVideoLines(val("tc-yt")), pi = parseImageLines(val("tc-imgs"));
+  if (pv.bad.length) { toast("Esse link do YouTube não parece válido: " + pv.bad[0], "err"); return; }
+  if (pi.err) { toast(pi.err, "err"); return; }
+  if (!pv.ids.length && !pi.urls.length) { toast("Adicione pelo menos um vídeo do YouTube ou uma imagem.", "err"); return; }
+  var vids = pv.ids.map(function (id, i) { return { id: id, url: pv.urls[i] }; });
   await withBusy(async function () {
-    await addDoc(collection(db, "tactics"), {
+    await addDoc(collection(db, "tactics"), Object.assign({
       title: title, type: val("tc-type"), map: val("tc-map").trim(), side: val("tc-side"), team: val("tc-team"),
-      youtubeUrl: yt, videoId: extractYoutubeId(yt) || "", images: imgs, note: val("tc-note").trim(),
-      addedAt: serverTimestamp(), addedBy: currentUser.uid
-    });
+      note: val("tc-note").trim(), addedAt: serverTimestamp(), addedBy: currentUser.uid
+    }, tacticMediaPayload(vids, pi.urls)));
     clearForm("tc-");
   }, "Publicado!");
+}
+
+async function saveTacticMedia(id) {
+  var t = tactics.find(function (x) { return x.id === id; });
+  if (!t) return;
+  var pv = parseVideoLines(val("tx-" + id + "-yt")), pi = parseImageLines(val("tx-" + id + "-imgs"));
+  if (pv.bad.length) { toast("Esse link do YouTube não parece válido: " + pv.bad[0], "err"); return; }
+  if (pi.err) { toast(pi.err, "err"); return; }
+  if (!pv.ids.length && !pi.urls.length) { toast("Cole pelo menos um link novo de vídeo ou de imagem.", "err"); return; }
+  var vids = tacticVideos(t).slice(), imgs = (t.images || []).slice();
+  pv.ids.forEach(function (vid, i) { if (!vids.some(function (x) { return x.id === vid; })) vids.push({ id: vid, url: pv.urls[i] }); });
+  pi.urls.forEach(function (u) { if (imgs.indexOf(u) === -1) imgs.push(u); });
+  await withBusy(async function () {
+    await setDoc(doc(db, "tactics", id), tacticMediaPayload(vids, imgs), { merge: true });
+    clearForm("tx-" + id + "-");
+  }, "Adicionado!");
+}
+
+async function removeTacticMedia(id, kind, i) {
+  var t = tactics.find(function (x) { return x.id === id; });
+  if (!t) return;
+  var vids = tacticVideos(t).slice(), imgs = (t.images || []).slice();
+  if (kind === "video") vids.splice(i, 1); else imgs.splice(i, 1);
+  if (!vids.length && !imgs.length) { toast("A tática precisa ficar com pelo menos um vídeo ou uma imagem.", "err"); return; }
+  if (!confirm("Remover este item?")) return;
+  await withBusy(function () { return setDoc(doc(db, "tactics", id), tacticMediaPayload(vids, imgs), { merge: true }); }, "Removido.");
 }
 
 async function addPlayer() {
@@ -1388,7 +1474,7 @@ document.addEventListener("click", function (e) {
     case "login-tab": loginTab = v; loginError = ""; render(); break;
     case "logout": signOut(auth); break;
     case "nav":
-      page = v; modal = null; lightbox = null; openAdminItem = null;
+      page = v; modal = null; lightbox = null; openAdminItem = null; openTacticEdit = null;
       filters = { status: "all", map: "", type: "" };
       render(); window.scrollTo(0, 0); break;
     case "open-modal": {
@@ -1413,6 +1499,15 @@ document.addEventListener("click", function (e) {
     case "filter-map": filters.map = v; render(); break;
     case "filter-type": filters.type = v; render(); break;
     case "mark-watched": markWatched(id); break;
+    case "tv-select": {
+      var ifr = document.querySelector("#modal-root .player iframe");
+      if (ifr) ifr.src = "https://www.youtube-nocookie.com/embed/" + v + "?rel=0&autoplay=1";
+      document.querySelectorAll("#modal-root .vitem").forEach(function (b) { b.classList.toggle("active", b.getAttribute("data-v") === v); });
+      break;
+    }
+    case "tactic-edit": openTacticEdit = openTacticEdit === id ? null : id; render(); break;
+    case "tactic-save-media": saveTacticMedia(id); break;
+    case "tactic-rm": removeTacticMedia(id, el.getAttribute("data-kind"), parseInt(el.getAttribute("data-i"), 10)); break;
     case "toggle-item": openAdminItem = openAdminItem === v ? null : v; render(); break;
     case "del": deleteItem(el.getAttribute("data-kind"), id); break;
     case "train-set": trainIdx = parseInt(v, 10) || 0; syncTrainUI(); saveTraining(); break;

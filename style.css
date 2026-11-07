@@ -396,3 +396,15 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 .train-seg { max-width: 420px; margin-bottom: 10px; }
 .train-modehelp { margin: 0 0 22px; color: var(--muted); font-size: 13.5px; max-width: 560px; }
+
+/* ---------- várias mídias por tática ---------- */
+.vlist { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 10px; margin: 8px 0 16px; scrollbar-width: thin; }
+.vitem { flex: 0 0 auto; width: 132px; display: flex; flex-direction: column; gap: 6px; padding: 6px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font-size: 12.5px; font-weight: 600; text-align: left; }
+.vitem:hover { border-color: var(--border-2); color: var(--text); }
+.vitem.active { border-color: var(--accent); color: var(--text); box-shadow: 0 0 0 3px var(--accent-soft); }
+.vthumb { display: block; aspect-ratio: 16 / 9; border-radius: 8px; overflow: hidden; background: #06080b; }
+.vthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mrow { display: flex; align-items: center; gap: 10px; padding: 6px 10px; margin-top: 6px; border-radius: 10px; background: var(--surface-2); }
+.mrow-t { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.icon-btn.on { color: var(--accent-2); border-color: rgba(255, 122, 26, 0.5); background: var(--accent-soft); }
+.tx-panel { padding: 6px 4px 16px; }
